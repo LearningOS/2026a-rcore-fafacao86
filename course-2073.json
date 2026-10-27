@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "courseId": 2073,
+  "repository": "LearningOS/2026a-rcore-fafacao86",
+  "user": "fafacao86",
+  "totalScore": 500,
+  "chapters": {
+    "ch3": {
+      "points": "7/7",
+      "score": 100,
+      "commit": "acb8e0b21a11d347c7d69b99d5866dd3d4e596b7"
+    }
+  },
+  "score": 100,
+  "upload": {
+    "status": "pending",
+    "runId": "40521312143",
+    "runAttempt": "1"
+  }
+}
