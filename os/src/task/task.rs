@@ -1,14 +1,17 @@
 //! Types related to task management
 
+use alloc::collections::BTreeMap;
+
 use super::TaskContext;
 
 /// The task control block (TCB) of a task.
-#[derive(Copy, Clone)]
 pub struct TaskControlBlock {
     /// The task status in it's lifecycle
     pub task_status: TaskStatus,
     /// The task context
     pub task_cx: TaskContext,
+    /// Number of syscalls made by this task, keyed by syscall ID.
+    pub syscall_stats: BTreeMap<usize, usize>,
 }
 
 /// The status of a task
