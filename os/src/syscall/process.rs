@@ -1,5 +1,27 @@
 //! Process management syscalls
-use crate::task::{change_program_brk, exit_current_and_run_next, suspend_current_and_run_next};
+use crate::{
+    mm::{PTEFlags, PageTable, PhysPageNum, VirtAddr},
+    task::*,
+    timer::get_time_us,
+};
+
+const TRACE_REQUEST_READ: usize = 0;
+const TRACE_REQUEST_WRITE: usize = 1;
+const TRACE_REQUEST_SYSCALL: usize = 2;
+
+/// Translate one user byte and verify the permission required by this access.
+fn user_byte_location(token: usize, addr: usize, writable: bool) -> Option<(PhysPageNum, usize)> {
+    let va = VirtAddr::from(addr);
+    let pte = PageTable::from_token(token).translate(va.floor())?;
+    let flags = pte.flags();
+    if (flags & PTEFlags::U) == PTEFlags::empty() || (writable && !pte.writable()) {
+        return None;
+    }
+    if !writable && !pte.readable() {
+        return None;
+    }
+    Some((pte.ppn(), va.page_offset()))
+}
 
 #[repr(C)]
 #[derive(Debug)]
@@ -9,8 +31,8 @@ pub struct TimeVal {
 }
 
 /// task exits and submit an exit code
-pub fn sys_exit(_exit_code: i32) -> ! {
-    trace!("kernel: sys_exit");
+pub fn sys_exit(exit_code: i32) -> ! {
+    trace!("[kernel] Application exited with code {}", exit_code);
     exit_current_and_run_next();
     panic!("Unreachable in sys_exit!");
 }
@@ -25,16 +47,53 @@ pub fn sys_yield() -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
-    -1
+    let us = get_time_us();
+    let time_val = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &time_val as *const TimeVal as *const u8,
+            core::mem::size_of::<TimeVal>(),
+        )
+    };
+    let token = current_user_token();
+    for (offset, byte) in bytes.iter().enumerate() {
+        let Some(addr) = (ts as usize).checked_add(offset) else {
+            return -1;
+        };
+        let Some((ppn, page_offset)) = user_byte_location(token, addr, true) else {
+            return -1;
+        };
+        ppn.get_bytes_array()[page_offset] = *byte;
+    }
+    0
 }
 
-/// TODO: Finish sys_trace to pass testcases
-/// HINT: You might reimplement it with virtual memory management.
-pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
+/// Inspect user memory or return the current task's syscall count.
+pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     trace!("kernel: sys_trace");
-    -1
+    let token = current_user_token();
+    match trace_request {
+        TRACE_REQUEST_READ => {
+            let Some((ppn, offset)) = user_byte_location(token, id, false) else {
+                return -1;
+            };
+            ppn.get_bytes_array()[offset] as isize
+        }
+        TRACE_REQUEST_WRITE => {
+            let Some((ppn, offset)) = user_byte_location(token, id, true) else {
+                return -1;
+            };
+            ppn.get_bytes_array()[offset] = data as u8;
+            0
+        }
+        TRACE_REQUEST_SYSCALL => current_syscall_count(id) as isize,
+        _ => -1,
+    }
 }
 
 // YOUR JOB: Implement mmap.

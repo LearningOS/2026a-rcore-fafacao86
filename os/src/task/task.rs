@@ -1,4 +1,6 @@
 //! Types related to task management
+use alloc::collections::BTreeMap;
+
 use super::TaskContext;
 use crate::config::TRAP_CONTEXT_BASE;
 use crate::mm::{
@@ -28,6 +30,12 @@ pub struct TaskControlBlock {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Number of syscalls made by this task, keyed by syscall ID.
+    ///
+    /// Linux similarly stores task-specific state in `task_struct`. This
+    /// teaching OS keeps a sparse counter map directly in the TCB.
+    pub syscall_stats: BTreeMap<usize, usize>,
 }
 
 impl TaskControlBlock {
@@ -63,6 +71,7 @@ impl TaskControlBlock {
             base_size: user_sp,
             heap_bottom: user_sp,
             program_brk: user_sp,
+            syscall_stats: BTreeMap::new(),
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.get_trap_cx();

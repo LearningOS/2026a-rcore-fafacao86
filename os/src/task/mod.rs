@@ -103,6 +103,27 @@ impl TaskManager {
         inner.tasks[cur].task_status = TaskStatus::Exited;
     }
 
+    /// Increment the current task's counter for a syscall.
+    fn increment_current_syscall_count(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let count = inner.tasks[current]
+            .syscall_stats
+            .entry(syscall_id)
+            .or_insert(0);
+        *count += 1;
+    }
+
+    /// Return how many times the current task has called a syscall.
+    fn current_syscall_count(&self, syscall_id: usize) -> usize {
+        let inner = self.inner.exclusive_access();
+        inner.tasks[inner.current_task]
+            .syscall_stats
+            .get(&syscall_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Find next task to run and return task id.
     ///
     /// In this case, we only return the first `Ready` task in task list.
@@ -201,4 +222,14 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Increment the current task's counter for a syscall.
+pub fn increment_current_syscall_count(syscall_id: usize) {
+    TASK_MANAGER.increment_current_syscall_count(syscall_id);
+}
+
+/// Return how many times the current task has called a syscall.
+pub fn current_syscall_count(syscall_id: usize) -> usize {
+    TASK_MANAGER.current_syscall_count(syscall_id)
 }
