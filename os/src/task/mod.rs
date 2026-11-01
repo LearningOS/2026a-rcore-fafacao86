@@ -15,6 +15,7 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::MapPermission;
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -154,6 +155,20 @@ impl TaskManager {
         inner.tasks[cur].change_program_brk(size)
     }
 
+    /// Insert an anonymous mapping in the current task's `MemorySet`.
+    fn current_mmap(&self, start: usize, len: usize, permission: MapPermission) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].memory_set.mmap(start, len, permission)
+    }
+
+    /// Remove mappings from the current task's address space.
+    fn current_munmap(&self, start: usize, len: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].memory_set.munmap(start, len)
+    }
+
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
@@ -232,4 +247,14 @@ pub fn increment_current_syscall_count(syscall_id: usize) {
 /// Return how many times the current task has called a syscall.
 pub fn current_syscall_count(syscall_id: usize) -> usize {
     TASK_MANAGER.current_syscall_count(syscall_id)
+}
+
+/// Insert an anonymous mapping in the current task.
+pub fn current_mmap(start: usize, len: usize, permission: MapPermission) -> bool {
+    TASK_MANAGER.current_mmap(start, len, permission)
+}
+
+/// Remove mappings from the current task's address space.
+pub fn current_munmap(start: usize, len: usize) -> bool {
+    TASK_MANAGER.current_munmap(start, len)
 }

@@ -1,6 +1,7 @@
 //! Process management syscalls
 use crate::{
-    mm::{PTEFlags, PageTable, PhysPageNum, VirtAddr},
+    config::PAGE_SIZE,
+    mm::{MapPermission, PTEFlags, PageTable, PhysPageNum, VirtAddr},
     task::*,
     timer::get_time_us,
 };
@@ -9,7 +10,7 @@ const TRACE_REQUEST_READ: usize = 0;
 const TRACE_REQUEST_WRITE: usize = 1;
 const TRACE_REQUEST_SYSCALL: usize = 2;
 
-/// Translate one user byte and verify the permission required by this access.
+/// Translate one user virtual byte with the task token and check U plus R or W.
 fn user_byte_location(token: usize, addr: usize, writable: bool) -> Option<(PhysPageNum, usize)> {
     let va = VirtAddr::from(addr);
     let pte = PageTable::from_token(token).translate(va.floor())?;
@@ -44,9 +45,9 @@ pub fn sys_yield() -> isize {
     0
 }
 
-/// YOUR JOB: get time with second and microsecond
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TimeVal`] is splitted by two pages ?
+/// Write the current uptime into a user `TimeVal`.
+///
+/// Bytes are translated individually so a 16-byte `TimeVal` may cross pages.
 pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
     let us = get_time_us();
@@ -73,7 +74,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     0
 }
 
-/// Inspect user memory or return the current task's syscall count.
+/// Read/write one user byte or query the current task's syscall count.
 pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     trace!("kernel: sys_trace");
     let token = current_user_token();
@@ -96,16 +97,38 @@ pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     }
 }
 
-// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!("kernel: sys_mmap NOT IMPLEMENTED YET!");
-    -1
+pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
+    trace!("kernel: sys_mmap");
+    if start % PAGE_SIZE != 0 || prot == 0 || prot & !0x7 != 0 {
+        return -1;
+    }
+    let mut permission = MapPermission::U;
+    if prot & 0x1 != 0 {
+        permission |= MapPermission::R;
+    }
+    if prot & 0x2 != 0 {
+        permission |= MapPermission::W;
+    }
+    if prot & 0x4 != 0 {
+        permission |= MapPermission::X;
+    }
+    if current_mmap(start, len, permission) {
+        0
+    } else {
+        -1
+    }
 }
 
-// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!("kernel: sys_munmap NOT IMPLEMENTED YET!");
-    -1
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    trace!("kernel: sys_munmap");
+    if start % PAGE_SIZE != 0 || len % PAGE_SIZE != 0 {
+        return -1;
+    }
+    if current_munmap(start, len) {
+        0
+    } else {
+        -1
+    }
 }
 /// change data segment size
 pub fn sys_sbrk(size: i32) -> isize {
