@@ -17,6 +17,7 @@ mod context;
 mod id;
 mod manager;
 mod processor;
+mod stride;
 mod switch;
 #[allow(clippy::module_inception)]
 mod task;

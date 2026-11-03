@@ -1,29 +1,35 @@
 //!Implementation of [`TaskManager`]
-use super::TaskControlBlock;
+use super::{stride, TaskControlBlock};
 use crate::sync::UPSafeCell;
-use alloc::collections::VecDeque;
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use lazy_static::*;
-///A array of `TaskControlBlock` that is thread-safe
-pub struct TaskManager {
-    ready_queue: VecDeque<Arc<TaskControlBlock>>,
+
+/// Interface used by the task manager to enqueue and select processes.
+pub(super) trait Scheduler: Send {
+    fn add(&mut self, task: Arc<TaskControlBlock>);
+    fn fetch(&mut self) -> Option<Arc<TaskControlBlock>>;
 }
 
-/// A simple FIFO scheduler.
+///A array of `TaskControlBlock` that is thread-safe
+pub struct TaskManager {
+    scheduler: Box<dyn Scheduler>,
+}
+
 impl TaskManager {
     ///Creat an empty TaskManager
     pub fn new() -> Self {
         Self {
-            ready_queue: VecDeque::new(),
+            scheduler: Box::new(stride::StrideScheduler::new()),
         }
     }
     /// Add process back to ready queue
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
-        self.ready_queue.push_back(task);
+        self.scheduler.add(task);
     }
-    /// Take a process out of the ready queue
+    /// Take the next ready process selected by the scheduler
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        self.scheduler.fetch()
     }
 }
 
