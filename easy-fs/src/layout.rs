@@ -6,7 +6,7 @@ use core::fmt::{Debug, Formatter, Result};
 /// Magic number for sanity check
 const EFS_MAGIC: u32 = 0x3b800001;
 /// The max number of direct inodes
-const INODE_DIRECT_COUNT: usize = 28;
+const INODE_DIRECT_COUNT: usize = 27;
 /// The max length of inode name
 const NAME_LENGTH_LIMIT: usize = 27;
 /// The max number of indirect1 inodes
@@ -82,6 +82,7 @@ type DataBlock = [u8; BLOCK_SZ];
 #[repr(C)]
 pub struct DiskInode {
     pub size: u32,
+    pub nlink: u32,
     pub direct: [u32; INODE_DIRECT_COUNT],
     pub indirect1: u32,
     pub indirect2: u32,
@@ -93,6 +94,7 @@ impl DiskInode {
     /// indirect1 and indirect2 block are allocated only when they are needed
     pub fn initialize(&mut self, type_: DiskInodeType) {
         self.size = 0;
+        self.nlink = 1;
         self.direct.iter_mut().for_each(|v| *v = 0);
         self.indirect1 = 0;
         self.indirect2 = 0;
@@ -307,6 +309,43 @@ impl DiskInode {
             });
         self.indirect2 = 0;
         v
+    }
+    /// Shrink a file and return blocks no longer used by it.
+    pub fn shrink_size(&mut self, new_size: u32, block_device: &Arc<dyn BlockDevice>) -> Vec<u32> {
+        assert!(new_size <= self.size);
+        let old_blocks = self.data_blocks() as usize;
+        let new_blocks = Self::_data_blocks(new_size) as usize;
+        let mut released = Vec::new();
+        for index in new_blocks..old_blocks {
+            released.push(self.get_block_id(index as u32, block_device));
+            if index < INODE_DIRECT_COUNT {
+                self.direct[index] = 0;
+            }
+        }
+        let old_groups = old_blocks
+            .saturating_sub(INDIRECT1_BOUND)
+            .div_ceil(INODE_INDIRECT1_COUNT);
+        let new_groups = new_blocks
+            .saturating_sub(INDIRECT1_BOUND)
+            .div_ceil(INODE_INDIRECT1_COUNT);
+        for index in new_groups..old_groups {
+            let block_id = get_block_cache(self.indirect2 as usize, Arc::clone(block_device))
+                .lock()
+                .read(0, |indirect2: &IndirectBlock| indirect2[index]);
+            released.push(block_id);
+        }
+        // remove indirect2 block, if shrink to only indirect1
+        if old_groups > 0 && new_groups == 0 {
+            released.push(self.indirect2);
+            self.indirect2 = 0;
+        }
+        // remove indirect1 block, if shrink to only direct_inodes
+        if old_blocks > INODE_DIRECT_COUNT && new_blocks <= INODE_DIRECT_COUNT {
+            released.push(self.indirect1);
+            self.indirect1 = 0;
+        }
+        self.size = new_size;
+        released
     }
     /// Read data from current disk inode
     pub fn read_at(
