@@ -1,5 +1,6 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
+use super::stride::StrideState;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::TRAP_CONTEXT_BASE;
 use crate::fs::{File, Stdin, Stdout};
@@ -31,6 +32,10 @@ impl TaskControlBlock {
     pub fn inner_exclusive_access(&self) -> RefMut<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }
+    /// Set the scheduling priority of this process.
+    pub fn set_priority(&self, priority: usize) {
+        self.inner_exclusive_access().scheduling.set_priority(priority);
+    }
     /// Get the address of app's page table
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
@@ -51,6 +56,9 @@ pub struct TaskControlBlockInner {
 
     /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
+
+    /// State used by the stride scheduler
+    pub(super) scheduling: StrideState,
 
     /// Application address space
     pub memory_set: MemorySet,
@@ -121,6 +129,7 @@ impl TaskControlBlock {
                     base_size: user_sp,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
+                    scheduling: StrideState::new(),
                     memory_set,
                     parent: None,
                     children: Vec::new(),
@@ -148,6 +157,14 @@ impl TaskControlBlock {
             trap_handler as usize,
         );
         task_control_block
+    }
+
+    /// Create a child directly from an ELF program, without copying the parent's address space.
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        let child = Arc::new(Self::new(elf_data));
+        child.inner_exclusive_access().parent = Some(Arc::downgrade(self));
+        self.inner_exclusive_access().children.push(child.clone());
+        child
     }
 
     /// Load a new elf to replace the original application address space and start execution
@@ -209,6 +226,7 @@ impl TaskControlBlock {
                     base_size: parent_inner.base_size,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
+                    scheduling: StrideState::new(),
                     memory_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),

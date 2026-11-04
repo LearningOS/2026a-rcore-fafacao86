@@ -318,6 +318,67 @@ impl MemorySet {
             false
         }
     }
+
+    /// Insert a private anonymous mapping at the requested virtual address.
+    ///
+    /// `len` is rounded up to whole pages. Every target PTE must be invalid;
+    pub fn mmap(&mut self, start: usize, len: usize, permission: MapPermission) -> bool {
+        if len == 0 {
+            return true;
+        }
+        let end = start + len;
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if let Some(pte) = self.page_table.translate(vpn) {
+                if pte.is_valid() {
+                    return false;
+                }
+            }
+        }
+        let mut area = MapArea::new(
+            VirtAddr::from(start_vpn),
+            VirtAddr::from(end_vpn),
+            MapType::Framed,
+            permission,
+        );
+        area.map(&mut self.page_table);
+        self.areas.push(area);
+        true
+    }
+
+    /// Remove one complete user `MapArea` in a page-aligned range.
+    ///
+    pub fn munmap(&mut self, start: usize, len: usize) -> bool {
+        if len == 0 {
+            return true;
+        }
+        let end = start + len;
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
+
+        let Some(index) = self.areas.iter().position(|area| {
+            area.vpn_range.get_start() == start_vpn
+                && area.vpn_range.get_end() == end_vpn
+                && (area.map_perm & MapPermission::U) != MapPermission::empty()
+        }) else {
+            return false;
+        };
+
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            let Some(pte) = self.page_table.translate(vpn) else {
+                return false;
+            };
+            let flags = pte.flags();
+            if !pte.is_valid() || (flags & PTEFlags::U) == PTEFlags::empty() {
+                return false;
+            }
+        }
+
+        let mut area = self.areas.remove(index);
+        area.unmap(&mut self.page_table);
+        true
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
