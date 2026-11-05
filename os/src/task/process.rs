@@ -29,6 +29,8 @@ pub struct ProcessControlBlockInner {
     pub is_zombie: bool,
     /// memory set(address space)
     pub memory_set: MemorySet,
+    pub heap_bottom: usize,
+    pub program_brk: usize,
     /// parent process
     pub parent: Option<Weak<ProcessControlBlock>>,
     /// children process
@@ -102,6 +104,8 @@ impl ProcessControlBlock {
                 UPSafeCell::new(ProcessControlBlockInner {
                     is_zombie: false,
                     memory_set,
+                    heap_bottom: ustack_base + crate::config::USER_STACK_SIZE,
+                    program_brk: ustack_base + crate::config::USER_STACK_SIZE,
                     parent: None,
                     children: Vec::new(),
                     exit_code: 0,
@@ -162,6 +166,8 @@ impl ProcessControlBlock {
         // substitute memory_set
         trace!("kernel: exec .. substitute memory_set");
         self.inner_exclusive_access().memory_set = memory_set;
+        self.inner_exclusive_access().heap_bottom = ustack_base + crate::config::USER_STACK_SIZE;
+        self.inner_exclusive_access().program_brk = ustack_base + crate::config::USER_STACK_SIZE;
         // then we alloc user resource for main thread again
         // since memory_set has been changed
         trace!("kernel: exec .. alloc user resource for main thread again");
@@ -235,6 +241,8 @@ impl ProcessControlBlock {
                 UPSafeCell::new(ProcessControlBlockInner {
                     is_zombie: false,
                     memory_set,
+                    heap_bottom: parent.heap_bottom,
+                    program_brk: parent.program_brk,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
                     exit_code: 0,
@@ -278,8 +286,40 @@ impl ProcessControlBlock {
         add_task(task);
         child
     }
+
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        let child = Self::new(elf_data);
+        child.inner_exclusive_access().parent = Some(Arc::downgrade(self));
+        self.inner_exclusive_access().children.push(Arc::clone(&child));
+        child
+    }
     /// get pid
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+
+    pub fn change_program_brk(&self, size: i32) -> Option<usize> {
+        let mut inner = self.inner_exclusive_access();
+        let heap_bottom = inner.heap_bottom;
+        let old_break = inner.program_brk;
+        let new_brk = inner.program_brk as isize + size as isize;
+        if new_brk < heap_bottom as isize {
+            return None;
+        }
+        let result = if size < 0 {
+            inner
+                .memory_set
+                .shrink_to(crate::mm::VirtAddr(heap_bottom), crate::mm::VirtAddr(new_brk as usize))
+        } else {
+            inner
+                .memory_set
+                .append_to(crate::mm::VirtAddr(heap_bottom), crate::mm::VirtAddr(new_brk as usize))
+        };
+        if result {
+            inner.program_brk = new_brk as usize;
+            Some(old_break)
+        } else {
+            None
+        }
     }
 }

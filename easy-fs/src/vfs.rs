@@ -14,6 +14,7 @@ use spin::{Mutex, MutexGuard};
 
 /// Inode struct in memory
 pub struct Inode {
+    inode_id: u32,
     /// The block id of the inode
     block_id: usize,
     /// The offset of the inode in the block
@@ -29,17 +30,28 @@ impl Inode {
     ///
     /// We should not acquire efs lock here.
     pub fn new(
+        inode_id: u32,
         block_id: u32,
         block_offset: usize,
         fs: Arc<Mutex<EasyFileSystem>>,
         block_device: Arc<dyn BlockDevice>,
     ) -> Self {
         Self {
+            inode_id,
             block_id: block_id as usize,
             block_offset,
             fs,
             block_device,
         }
+    }
+    /// Return the inode number in the filesystem.
+    pub fn inode_id(&self) -> u32 {
+        self.inode_id
+    }
+    /// Return the file type and hard link count from the disk inode.
+    pub fn stat_info(&self) -> (bool, u32) {
+        let _fs = self.fs.lock();
+        self.read_disk_inode(|disk_inode| (disk_inode.is_dir(), disk_inode.nlink))
     }
     /// read the content of the disk inode on disk with 'f' function
     fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
@@ -77,6 +89,7 @@ impl Inode {
             self.find_inode_id(name, disk_inode).map(|inode_id| {
                 let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id);
                 Arc::new(Self::new(
+                    inode_id,
                     block_id,
                     block_offset,
                     self.fs.clone(),
@@ -143,12 +156,128 @@ impl Inode {
         block_cache_sync_all();
         // return inode
         Some(Arc::new(Self::new(
+            new_inode_id,
             block_id,
             block_offset,
             self.fs.clone(),
             self.block_device.clone(),
         )))
         // release efs lock automatically by compiler
+    }
+    /// Add another name for an existing file in this directory.
+    pub fn link(&self, old_name: &str, new_name: &str) -> bool {
+        if old_name.is_empty() || new_name.is_empty() || new_name.len() > 27 {
+            return false;
+        }
+        let mut fs = self.fs.lock();
+        // fail if old_name does not exist or new_name already exist
+        let new_inode_id = self.read_disk_inode(|dir| self.find_inode_id(new_name, dir));
+        if new_inode_id.is_some() {
+            return false;
+        }
+        let old_inode_id = self.read_disk_inode(|dir| self.find_inode_id(old_name, dir));
+        let Some(old_inode_id) = old_inode_id else {
+            return false;
+        };
+
+        let (block_id, block_offset) = fs.get_disk_inode_pos(old_inode_id);
+        let inode_cache = get_block_cache(block_id as usize, Arc::clone(&self.block_device));
+        let can_link = inode_cache
+            .lock()
+            .read(block_offset, |inode: &DiskInode| inode.is_file());
+        if !can_link {
+            return false;
+        }
+        self.modify_disk_inode(|dir| {
+            let offset = dir.size as usize;
+            self.increase_size((offset + DIRENT_SZ) as u32, dir, &mut fs);
+            let entry = DirEntry::new(new_name, old_inode_id);
+            assert_eq!(
+                dir.write_at(offset, entry.as_bytes(), &self.block_device),
+                DIRENT_SZ,
+            );
+        });
+        inode_cache
+            .lock()
+            .modify(block_offset, |inode: &mut DiskInode| inode.nlink += 1);
+        block_cache_sync_all();
+        true
+    }
+    /// Remove a name from this directory.
+    pub fn unlink(&self, name: &str) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+        let mut fs = self.fs.lock();
+        let entry = self.read_disk_inode(|dir| {
+            assert!(dir.is_dir());
+            let count = dir.size as usize / DIRENT_SZ;
+            let mut entry = DirEntry::empty();
+            for index in 0..count {
+                assert_eq!(
+                    dir.read_at(index * DIRENT_SZ, entry.as_bytes_mut(), &self.block_device),
+                    DIRENT_SZ,
+                );
+                if entry.name() == name {
+                    return Some((index, entry.inode_id()));
+                }
+            }
+            None
+        });
+        let Some((index, inode_id)) = entry else {
+            return false;
+        };
+        let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id);
+        let inode_cache = get_block_cache(block_id as usize, Arc::clone(&self.block_device));
+        let is_file = inode_cache.lock().read(block_offset, |inode: &DiskInode| {
+            inode.is_file() && inode.nlink > 0
+        });
+        if !is_file {
+            return false;
+        }
+
+        let released_dir_blocks = self.modify_disk_inode(|dir| {
+            let last_index = dir.size as usize / DIRENT_SZ - 1;
+            // move last to the target index
+            if index != last_index {
+                let mut last = DirEntry::empty();
+                assert_eq!(
+                    dir.read_at(
+                        last_index * DIRENT_SZ,
+                        last.as_bytes_mut(),
+                        &self.block_device
+                    ),
+                    DIRENT_SZ,
+                );
+                assert_eq!(
+                    dir.write_at(index * DIRENT_SZ, last.as_bytes(), &self.block_device),
+                    DIRENT_SZ,
+                );
+            }
+            dir.shrink_size(dir.size - DIRENT_SZ as u32, &self.block_device)
+        });
+        let released_file_blocks =
+            inode_cache
+                .lock()
+                .modify(block_offset, |inode: &mut DiskInode| {
+                    inode.nlink -= 1;
+                    if inode.nlink == 0 {
+                        Some(inode.clear_size(&self.block_device))
+                    } else {
+                        None
+                    }
+                });
+        for block_id in released_dir_blocks {
+            fs.dealloc_data(block_id);
+        }
+        if let Some(blocks) = released_file_blocks {
+            for block_id in blocks {
+                fs.dealloc_data(block_id);
+            }
+            fs.dealloc_inode(inode_id);
+        }
+        block_cache_sync_all();
+        true
     }
     /// create a directory with 'name' in the root directory
     ///

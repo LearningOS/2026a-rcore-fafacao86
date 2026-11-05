@@ -54,10 +54,8 @@ pub const SYSCALL_EXEC: usize = 221;
 pub const SYSCALL_WAITPID: usize = 260;
 /// set priority syscall
 pub const SYSCALL_SET_PRIORITY: usize = 140;
-/*
 /// sbrk syscall
 pub const SYSCALL_SBRK: usize = 214;
-*/
 /// munmap syscall
 pub const SYSCALL_MUNMAP: usize = 215;
 /// mmap syscall
@@ -98,6 +96,8 @@ pub const SYSCALL_CONDVAR_CREATE: usize = 471;
 pub const SYSCALL_CONDVAR_SIGNAL: usize = 472;
 /// condvar_wait syscallca
 pub const SYSCALL_CONDVAR_WAIT: usize = 473;
+/// trace syscall
+pub const SYSCALL_TRACE: usize = 410;
 
 mod fs;
 mod process;
@@ -113,6 +113,12 @@ use crate::fs::Stat;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
+    *crate::task::current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .syscall_stats
+        .entry(syscall_id)
+        .or_insert(0) += 1;
     match syscall_id {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_LINKAT => sys_linkat(args[1] as *const u8, args[3] as *const u8),
@@ -135,6 +141,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
         SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2]),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_SET_PRIORITY => sys_set_priority(args[0] as isize),
+        SYSCALL_SBRK => sys_sbrk(args[0] as i32),
         SYSCALL_SPAWN => sys_spawn(args[0] as *const u8),
         SYSCALL_THREAD_CREATE => sys_thread_create(args[0], args[1]),
         SYSCALL_WAITTID => sys_waittid(args[0]) as isize,
@@ -148,6 +155,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 4]) -> isize {
         SYSCALL_CONDVAR_CREATE => sys_condvar_create(),
         SYSCALL_CONDVAR_SIGNAL => sys_condvar_signal(args[0]),
         SYSCALL_CONDVAR_WAIT => sys_condvar_wait(args[0], args[1]),
+        SYSCALL_TRACE => sys_trace(args[0], args[1], args[2]),
         SYSCALL_KILL => sys_kill(args[0], args[1] as u32),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }

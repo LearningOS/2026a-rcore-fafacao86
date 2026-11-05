@@ -4,13 +4,14 @@
 //! Other CPU process monitoring functions are in Processor.
 
 use super::{ProcessControlBlock, TaskControlBlock, TaskStatus};
+use super::stride::StrideScheduler;
 use crate::sync::UPSafeCell;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use lazy_static::*;
 ///A array of `TaskControlBlock` that is thread-safe
 pub struct TaskManager {
-    ready_queue: VecDeque<Arc<TaskControlBlock>>,
+    ready_queue: StrideScheduler,
     
     /// The stopping task, leave a reference so that the kernel stack will not be recycled when switching tasks
     stop_task: Option<Arc<TaskControlBlock>>,
@@ -21,27 +22,20 @@ impl TaskManager {
     ///Creat an empty TaskManager
     pub fn new() -> Self {
         Self {
-            ready_queue: VecDeque::new(),
+            ready_queue: StrideScheduler::new(),
             stop_task: None,
         }
     }
     /// Add process back to ready queue
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
-        self.ready_queue.push_back(task);
+        self.ready_queue.add(task);
     }
     /// Take a process out of the ready queue
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        self.ready_queue.fetch()
     }
     pub fn remove(&mut self, task: Arc<TaskControlBlock>) {
-        if let Some((id, _)) = self
-            .ready_queue
-            .iter()
-            .enumerate()
-            .find(|(_, t)| Arc::as_ptr(t) == Arc::as_ptr(&task))
-        {
-            self.ready_queue.remove(id);
-        }
+        self.ready_queue.remove(&task);
     }
     /// Add a task to stopping task
     pub fn add_stop(&mut self, task: Arc<TaskControlBlock>) {

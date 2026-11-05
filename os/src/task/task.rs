@@ -1,10 +1,12 @@
 //! Types related to task management & Functions for completely changing TCB
 
 use super::id::TaskUserRes;
+use super::stride::StrideState;
 use super::{kstack_alloc, KernelStack, ProcessControlBlock, TaskContext};
 use crate::trap::TrapContext;
 use crate::{mm::PhysPageNum, sync::UPSafeCell};
 use alloc::sync::{Arc, Weak};
+use alloc::collections::BTreeMap;
 use core::cell::RefMut;
 
 /// Task control block structure
@@ -41,6 +43,8 @@ pub struct TaskControlBlockInner {
     pub task_status: TaskStatus,
     /// It is set when active exit or execution error occurs
     pub exit_code: Option<i32>,
+    pub syscall_stats: BTreeMap<usize, usize>,
+    pub(super) scheduling: StrideState,
 }
 
 impl TaskControlBlockInner {
@@ -55,6 +59,11 @@ impl TaskControlBlockInner {
 }
 
 impl TaskControlBlock {
+    /// Set the scheduling priority.
+    pub fn set_priority(&self, priority: usize) {
+        self.inner_exclusive_access().scheduling.set_priority(priority);
+    }
+
     /// Create a new task
     pub fn new(
         process: Arc<ProcessControlBlock>,
@@ -75,6 +84,8 @@ impl TaskControlBlock {
                     task_cx: TaskContext::goto_trap_return(kstack_top),
                     task_status: TaskStatus::Ready,
                     exit_code: None,
+                    syscall_stats: BTreeMap::new(),
+                    scheduling: StrideState::new(),
                 })
             },
         }

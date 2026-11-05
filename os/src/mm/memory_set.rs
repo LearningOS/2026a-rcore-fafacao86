@@ -4,7 +4,7 @@ use super::{frame_alloc, FrameTracker};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
-use crate::config::{MEMORY_END, MMIO, PAGE_SIZE, TRAMPOLINE};
+use crate::config::{MEMORY_END, MMIO, PAGE_SIZE, TRAMPOLINE, USER_STACK_SIZE};
 use crate::sync::UPSafeCell;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -220,6 +220,16 @@ impl MemorySet {
         let max_end_va: VirtAddr = max_end_vpn.into();
         let mut user_stack_base: usize = max_end_va.into();
         user_stack_base += PAGE_SIZE;
+        let heap_bottom = user_stack_base + USER_STACK_SIZE;
+        memory_set.push(
+            MapArea::new(
+                heap_bottom.into(),
+                heap_bottom.into(),
+                MapType::Framed,
+                MapPermission::R | MapPermission::W | MapPermission::U,
+            ),
+            None,
+        );
         (
             memory_set,
             user_stack_base,
@@ -246,6 +256,67 @@ impl MemorySet {
         }
         memory_set
     }
+    /// Insert a private anonymous mapping at the requested virtual address.
+    ///
+    /// `len` is rounded up to whole pages. Every target PTE must be invalid;
+    pub fn mmap(&mut self, start: usize, len: usize, permission: MapPermission) -> bool {
+        if len == 0 {
+            return true;
+        }
+        let end = start + len;
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if let Some(pte) = self.page_table.translate(vpn) {
+                if pte.is_valid() {
+                    return false;
+                }
+            }
+        }
+        let mut area = MapArea::new(
+            VirtAddr::from(start_vpn),
+            VirtAddr::from(end_vpn),
+            MapType::Framed,
+            permission,
+        );
+        area.map(&mut self.page_table);
+        self.areas.push(area);
+        true
+    }
+
+    /// Remove one complete user `MapArea` in a page-aligned range.
+    ///
+    pub fn munmap(&mut self, start: usize, len: usize) -> bool {
+        if len == 0 {
+            return true;
+        }
+        let end = start + len;
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
+
+        let Some(index) = self.areas.iter().position(|area| {
+            area.vpn_range.get_start() == start_vpn
+                && area.vpn_range.get_end() == end_vpn
+                && (area.map_perm & MapPermission::U) != MapPermission::empty()
+        }) else {
+            return false;
+        };
+
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            let Some(pte) = self.page_table.translate(vpn) else {
+                return false;
+            };
+            let flags = pte.flags();
+            if !pte.is_valid() || (flags & PTEFlags::U) == PTEFlags::empty() {
+                return false;
+            }
+        }
+
+        let mut area = self.areas.remove(index);
+        area.unmap(&mut self.page_table);
+        true
+    }
+
     /// Change page table by writing satp CSR Register.
     pub fn activate(&self) {
         let satp = self.page_table.token();
