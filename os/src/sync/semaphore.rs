@@ -1,6 +1,6 @@
 //! Semaphore
 
-use crate::sync::UPSafeCell;
+use crate::sync::{deadlock, UPSafeCell};
 use crate::task::{block_current_and_run_next, current_task, wakeup_task, TaskControlBlock};
 use alloc::{collections::VecDeque, sync::Arc};
 
@@ -8,6 +8,7 @@ use alloc::{collections::VecDeque, sync::Arc};
 pub struct Semaphore {
     /// semaphore inner
     pub inner: UPSafeCell<SemaphoreInner>,
+    resource_id: usize,
 }
 
 pub struct SemaphoreInner {
@@ -17,7 +18,7 @@ pub struct SemaphoreInner {
 
 impl Semaphore {
     /// Create a new semaphore
-    pub fn new(res_count: usize) -> Self {
+    pub fn new(res_count: usize, resource_id: usize) -> Self {
         trace!("kernel: Semaphore::new");
         Self {
             inner: unsafe {
@@ -26,6 +27,7 @@ impl Semaphore {
                     wait_queue: VecDeque::new(),
                 })
             },
+            resource_id,
         }
     }
 
@@ -36,9 +38,12 @@ impl Semaphore {
         inner.count += 1;
         if inner.count <= 0 {
             if let Some(task) = inner.wait_queue.pop_front() {
+                deadlock::semaphore_released(self.resource_id, Some(&task));
                 wakeup_task(task);
+                return;
             }
         }
+        deadlock::semaphore_released(self.resource_id, None);
     }
 
     /// down operation of semaphore
@@ -51,5 +56,6 @@ impl Semaphore {
             drop(inner);
             block_current_and_run_next();
         }
+        deadlock::semaphore_acquired(self.resource_id);
     }
 }

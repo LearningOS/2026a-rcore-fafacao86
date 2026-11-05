@@ -1,11 +1,13 @@
 //! Synchronization and interior mutability primitives
 
 mod condvar;
+pub(crate) mod deadlock;
 mod mutex;
 mod semaphore;
 mod up;
 
 pub use condvar::Condvar;
+pub(crate) use deadlock::{DeadlockDetector, DEADLOCK_ERROR};
 pub use mutex::{Mutex, MutexBlocking, MutexSpin};
 pub use semaphore::Semaphore;
 pub use up::UPSafeCell;
